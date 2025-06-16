@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Food Prediction Result</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module" src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.esm.js"></script>
+    <script nomodule src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.js"></script>
+</head>
+
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+
+    <div id="menu"
+        class="fixed inset-0 z-40 transform translate-x-full transition-all duration-300 ease-in-out bg-gray-800 bg-opacity-75">
+        <div class="flex justify-between items-center p-4">
+            <span class="text-white font-bold text-2xl" id="username">Loading...</span> <ion-icon onclick="myfunction(this)" name="close" size="large" class="text-white cursor-pointer"></ion-icon>
+        </div>
+        <div class="flex flex-col items-center space-y-6 text-white mt-12">
+            <button onclick="window.location.href='hello.html'"
+                class="bg-blue-600 py-2 px-6 rounded-lg hover:bg-blue-500">Upload Another Image</button>
+            <button onclick="logout()" class="bg-red-600 py-2 px-6 rounded-lg hover:bg-red-500">Logout</button>
+        </div>
+    </div>
+
+    <div class="w-full max-w-4xl bg-white p-12 rounded-lg shadow-lg">
+
+        <div class="flex justify-between items-center mb-6">
+            <ion-icon onclick="myfunction(this)" name="menu" size="large"
+                class="cursor-pointer text-black z-50"></ion-icon>
+            <h2 class="text-2xl font-bold text-gray-800">Food Prediction Result</h2>
+            <span class="text-lg text-gray-800" id="username-display">Loading...</span> </div>
+
+        <div class="flex justify-center mt-4">
+            <img id="uploaded-image" class="rounded-lg shadow-md max-w-xs h-auto" />
+        </div>
+
+        <h3 id="food-name" class="text-xl font-bold capitalize text-center mt-4"></h3>
+        <p id="food-calories" class="text-gray-800 font-bold text-xl text-center"></p>
+
+        <canvas id="food-chart" class="mt-6"></canvas>
+
+        <div class="flex justify-around text-lg font-medium mt-6">
+            <span class="text-orange-500">Carbs: <span id="carbs-value"></span>g</span>
+            <span class="text-red-500">Protein: <span id="protein-value"></span>g</span>
+            <span class="text-yellow-500">Fat: <span id="fat-value"></span>g</span>
+        </div>
+
+        <div class="flex justify-center gap-4 mt-6">
+            <button id="uploadAnother"
+                class="text-white font-semibold text-lg rounded bg-blue-600 px-6 py-2 hover:bg-blue-500">
+                Upload Another Image
+            </button>
+        </div>
+
+    </div>
+
+    <script>
+    function myfunction(e) {
+        e.name = e.name === 'close' ? 'menu' : 'close';
+        document.querySelector('#menu').classList.toggle('translate-x-full');
+    }
+
+    function logout() {
+        localStorage.removeItem("token");
+        localStorage.removeItem("username");
+        localStorage.removeItem("uploadedImage");
+        window.location.href = "login.html";
+    }
+
+    function displayUserName() {
+        const storedUsername = localStorage.getItem("username");
+        if (storedUsername) {
+            document.getElementById("username").textContent = storedUsername;
+            document.getElementById("username-display").textContent = storedUsername;
+        } else {
+            document.getElementById("username").textContent = "Guest";
+            document.getElementById("username-display").textContent = "Guest";
+        }
+    }
+
+    function displayPrediction(data) {
+        document.getElementById("food-name").textContent = data.food_name || "Unknown";
+        document.getElementById("food-calories").textContent = `Calories: ${data.calories || 0}`;
+        document.getElementById("carbs-value").textContent = data.carbs || 0;
+        document.getElementById("protein-value").textContent = data.protein || 0;
+        document.getElementById("fat-value").textContent = data.fat || 0;
+
+        const ctx = document.getElementById("food-chart").getContext("2d");
+        if (window.foodChartInstance) {
+            window.foodChartInstance.destroy();
+        }
+        window.foodChartInstance = new Chart(ctx, {
+            type: "bar",
+            data: {
+                labels: ["Carbs", "Protein", "Fat"],
+                datasets: [{
+                    label: "Nutrient Content (g)",
+                    data: [data.carbs, data.protein, data.fat],
+                    backgroundColor: ["#FFA500", "#FF4500", "#FFD700"],
+                    borderColor: ["#CC8400", "#CC3700", "#CCB000"],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+    }
+
+    async function savePredictionToHistory(predictionData) {
+        const token = localStorage.getItem("token");
+        if (!token) {
+            console.warn("No token found. Cannot save prediction history.");
+            return;
+        }
+
+        const dataToSend = {
+            food_name: predictionData.food_name,
+            calories: predictionData.calories,
+            carbs: predictionData.carbs,
+            protein: predictionData.protein,
+            fat: predictionData.fat
+        };
+
+        try {
+            // FIX: Removed markdown link formatting from the URL
+            const response = await fetch("http://127.0.0.1:3000/history", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify(dataToSend)
+            });
+
+            if (!response.ok) {
+                const errorResult = await response.json();
+                console.error("Failed to save prediction to history:", errorResult.message || response.statusText);
+            } else {
+                const successResult = await response.json();
+                console.log("Prediction history saved successfully:", successResult.message);
+            }
+        } catch (error) {
+            console.error("Error sending prediction to history backend:", error);
+        }
+    }
+
+    async function fetchPrediction(imageData) {
+        try {
+            console.log("Fetching prediction...");
+
+            const blob = await fetch(imageData).then(res => res.blob());
+            const formData = new FormData();
+            formData.append("file", blob, "food_image.png");
+
+            // FIX: Removed markdown link formatting from the URL
+            const response = await fetch("http://127.0.0.1:5000/food", {
+                method: "POST",
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Prediction failed: ${response.status} - ${errorText}`);
+            }
+
+            const data = await response.json();
+            displayPrediction(data);
+            
+            savePredictionToHistory(data);
+
+        } catch (error) {
+            console.error("Error fetching prediction:", error);
+            alert("Error: Could not process the image. " + error.message);
+        }
+    }
+
+    document.getElementById("uploadAnother").addEventListener("click", () => {
+        window.location.href = "hello.html";
+    });
+
+    document.addEventListener("DOMContentLoaded", () => {
+        displayUserName();
+
+        const uploadedImage = localStorage.getItem("uploadedImage");
+        if (uploadedImage) {
+            document.getElementById("uploaded-image").src = uploadedImage;
+            fetchPrediction(uploadedImage);
+        } else {
+            alert("No image found to display result. Please upload an image first.");
+            window.location.href = "hello.html";
+        }
+    });
+
+    </script>
+
+</body>
+
+</html>
