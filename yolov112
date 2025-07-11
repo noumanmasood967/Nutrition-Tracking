@@ -1,0 +1,337 @@
+from google.colab import drive
+import os
+!pip install rarfile
+!pip install ultralytics
+import rarfile
+import shutil
+import yaml
+import random
+from pathlib import Path
+import time
+from datetime import datetime
+from ultralytics import YOLO
+
+# --- Configuration ---
+# Ensure your RAR files are in this Google Drive folder
+DRIVE_ROOT = '/content/drive/My Drive/'
+DRIVE_FOOD_FOLDER = os.path.join(DRIVE_ROOT, 'Food')
+RAR_FILE1 = os.path.join(DRIVE_FOOD_FOLDER, 'foood.rar')
+RAR_FILE2 = os.path.join(DRIVE_FOOD_FOLDER, 'food-101.rar')
+
+# Output directories (will be created in /content/ for faster I/O during training)
+WORK_DIR = '/content/yolo_food_data'
+EXTRACT_DIR1 = os.path.join(WORK_DIR, 'extracted_foood')
+EXTRACT_DIR2 = os.path.join(WORK_DIR, 'extracted_food-101')
+COMBINED_DATA_DIR = os.path.join(WORK_DIR, 'combined_dataset')
+LABELS_DIR = os.path.join(COMBINED_DATA_DIR, 'labels')
+IMAGES_DIR = os.path.join(COMBINED_DATA_DIR, 'images')
+
+# Training configuration
+MODEL_TO_USE = 'yolo11s.pt' # Using YOLOv11 small model
+EPOCHS = 50                 # Number of training epochs
+IMG_SIZE = 640              # Image size for training
+
+# --- OPTIMIZED FOR A100 ---
+# A100 has significant VRAM (e.g., 40GB or 80GB).
+# Maximize batch size to fully utilize the GPU. Reduce if "CUDA Out Of Memory" occurs.
+BATCH_SIZE = 128            # Increased batch size for A100
+
+PROJECT_NAME = 'Food_Detection_YOLOv11'
+SAVE_PERIOD_EPOCHS = 5      # Save model every N epochs to Google Drive
+
+# Unique run name for organizing outputs in Google Drive (for fresh start)
+RUN_NAME = f'{datetime.now().strftime("%Y%m%d_%H%M%S")}_{PROJECT_NAME}'
+# The line below is now only used if PATH_TO_LAST_PT is None (fresh run)
+# OUTPUT_SAVE_DIR = os.path.join(DRIVE_FOOD_FOLDER, 'training_runs', RUN_NAME)
+
+
+# --- FOR RESUMING TRAINING ---
+# If you need to resume a previous run, uncomment the line below and set the exact path
+# to your 'last.pt' (or 'epochXX.pt') file from that previous run.
+# Make sure the RUN_NAME above is commented out or not used if resuming.
+# Example path: '/content/drive/My Drive/Food/training_runs/20250710_123456_Food_Detection_YOLOv11/Food_Detection_YOLOv11/weights/last.pt'
+PATH_TO_LAST_PT = '/content/drive/My Drive/Food/training_runs/20250710_163729_Food_Detection_YOLOv11/Food_Detection_YOLOv112/weights/last.pt' # <--- YOU MUST REPLACE 'YOUR_ACTUAL_TIMESTAMP_FOLDER_NAME_HERE' with your previous run's folder!
+# If you want a fresh run, change the above line back to: PATH_TO_LAST_PT = None
+
+
+# --- Phase 0: Initial Setup and Drive Mounting ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 0: Initial Setup and Google Drive Mounting")
+start_time_phase0 = time.time()
+
+# Mount Google Drive (will prompt for authorization if not already mounted)
+# Using the common mount point for robustness
+if not os.path.exists(DRIVE_ROOT):
+    drive.mount('/content/drive')
+    print("Google Drive mounted successfully.")
+else:
+    print("Google Drive already mounted.")
+
+# Create working directories
+os.makedirs(WORK_DIR, exist_ok=True)
+os.makedirs(EXTRACT_DIR1, exist_ok=True)
+os.makedirs(EXTRACT_DIR2, exist_ok=True)
+os.makedirs(COMBINED_DATA_DIR, exist_ok=True)
+os.makedirs(LABELS_DIR, exist_ok=True)
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
+# Create the specific output directory for this run.
+# If resuming, this path should match the previous run's output directory.
+if PATH_TO_LAST_PT:
+    # If resuming, derive OUTPUT_SAVE_DIR from PATH_TO_LAST_PT
+    # This assumes a specific structure: .../training_runs/RUN_NAME/PROJECT_NAME/weights/last.pt
+    # Adjust if your actual path structure is different.
+    OUTPUT_SAVE_DIR = Path(PATH_TO_LAST_PT).parents[2] # Go up 2 levels from 'weights' to 'RUN_NAME'
+    PROJECT_NAME = Path(PATH_TO_LAST_PT).parents[1].name # Extract project name from path
+    print(f"Resuming run. Output will be saved to: {OUTPUT_SAVE_DIR}")
+else:
+    # This branch is for a fresh run
+    OUTPUT_SAVE_DIR = os.path.join(DRIVE_FOOD_FOLDER, 'training_runs', RUN_NAME) # Re-initialize for fresh run
+    os.makedirs(OUTPUT_SAVE_DIR, exist_ok=True) # Create new directory for fresh run
+    print(f"Starting new run. Output will be saved to: {OUTPUT_SAVE_DIR}")
+
+os.makedirs(os.path.join(OUTPUT_SAVE_DIR, PROJECT_NAME), exist_ok=True) # Ensure the project subdirectory also exists
+
+
+end_time_phase0 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 0 completed in {end_time_phase0 - start_time_phase0:.2f} seconds.\n")
+
+# --- Phase 1: Extract RAR files ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 1: Extracting RAR files")
+start_time_phase1 = time.time()
+
+try:
+    with rarfile.RarFile(RAR_FILE1, 'r') as rf:
+        rf.extractall(EXTRACT_DIR1)
+    print(f"Extracted {RAR_FILE1} to {EXTRACT_DIR1}")
+
+    with rarfile.RarFile(RAR_FILE2, 'r') as rf:
+        rf.extractall(EXTRACT_DIR2)
+    print(f"Extracted {RAR_FILE2} to {EXTRACT_DIR2}")
+except rarfile.BadRarFile:
+    print("Error: One or both RAR files are corrupt or not valid RAR archives.")
+    exit()
+except FileNotFoundError:
+    print("Error: One or both RAR files not found. Please ensure they are in the specified Google Drive folder:")
+    print(f"  {RAR_FILE1}")
+    print(f"  {RAR_FILE2}")
+    exit()
+except Exception as e:
+    print(f"An error occurred during RAR extraction: {e}")
+    exit()
+
+end_time_phase1 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 1 completed in {end_time_phase1 - start_time_phase1:.2f} seconds.\n")
+
+# --- Phase 2: Pseudo-labeling and Combining Datasets ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 2: Pseudo-labeling and Combining Datasets")
+start_time_phase2 = time.time()
+
+all_classes = []
+image_paths = []
+current_image_count = 0
+
+def process_dataset(src_dir, dataset_name):
+    global current_image_count
+    for root, _, files in os.walk(src_dir):
+        class_name = os.path.basename(root)
+        if class_name not in all_classes:
+            all_classes.append(class_name)
+
+        class_id = all_classes.index(class_name)
+
+        for file in files:
+            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                original_image_path = os.path.join(root, file)
+                # Create a unique name for the image in the combined dataset
+                new_image_name = f"{dataset_name}_{current_image_count:07d}{Path(file).suffix}"
+                destination_image_path = os.path.join(IMAGES_DIR, new_image_name)
+
+                shutil.copy(original_image_path, destination_image_path)
+                image_paths.append(destination_image_path)
+
+                # Create a dummy label file (pseudo-labeling: whole image is the object)
+                label_filename = Path(new_image_name).stem + '.txt'
+                label_filepath = os.path.join(LABELS_DIR, label_filename)
+                with open(label_filepath, 'w') as f:
+                    # YOLO format: class_id center_x center_y width height
+                    # For pseudo-labeling, we assume the object covers the entire image (0 0 1 1)
+                    # This is a placeholder; real object detection requires proper annotations.
+                    f.write(f"{class_id} 0.5 0.5 1.0 1.0\n")
+                current_image_count += 1
+
+print(f"Processing {RAR_FILE1.split('/')[-1]}...")
+process_dataset(EXTRACT_DIR1, 'foood')
+print(f"Processing {RAR_FILE2.split('/')[-1]}...")
+process_dataset(EXTRACT_DIR2, 'food101')
+
+# Now, `all_classes` contains all unique class names and `image_paths` all copied images.
+
+end_time_phase2 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 2 completed in {end_time_phase2 - start_time_phase2:.2f} seconds.\n")
+
+# --- Phase 3: Split Dataset (Train/Val/Test) ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 3: Splitting Dataset (Train/Val/Test)")
+start_time_phase3 = time.time()
+
+random.shuffle(image_paths)
+
+train_split = 0.8
+val_split = 0.1
+test_split = 0.1 # Remaining after train and val
+
+num_images = len(image_paths)
+num_train = int(num_images * train_split)
+num_val = int(num_images * val_split)
+num_test = num_images - num_train - num_val # Ensure all images are accounted for
+
+train_images = image_paths[:num_train]
+val_images = image_paths[num_train:num_train + num_val]
+test_images = image_paths[num_train + num_val:]
+
+# Create directories for YOLO dataset structure
+dataset_root = COMBINED_DATA_DIR
+train_img_dir = os.path.join(dataset_root, 'train', 'images')
+train_lbl_dir = os.path.join(dataset_root, 'train', 'labels')
+val_img_dir = os.path.join(dataset_root, 'val', 'images')
+val_lbl_dir = os.path.join(dataset_root, 'val', 'labels')
+test_img_dir = os.path.join(dataset_root, 'test', 'images')
+test_lbl_dir = os.path.join(dataset_root, 'test', 'labels')
+
+os.makedirs(train_img_dir, exist_ok=True)
+os.makedirs(train_lbl_dir, exist_ok=True)
+os.makedirs(val_img_dir, exist_ok=True)
+os.makedirs(val_lbl_dir, exist_ok=True)
+os.makedirs(test_img_dir, exist_ok=True)
+os.makedirs(test_lbl_dir, exist_ok=True)
+
+def copy_files_to_split(image_list, img_dest_dir, lbl_dest_dir):
+    for img_path in image_list:
+        img_filename = os.path.basename(img_path)
+        lbl_filename = Path(img_filename).stem + '.txt'
+
+        # Source paths are from IMAGES_DIR and LABELS_DIR
+        src_img_path = os.path.join(IMAGES_DIR, img_filename)
+        src_lbl_path = os.path.join(LABELS_DIR, lbl_filename)
+
+        shutil.copy(src_img_path, os.path.join(img_dest_dir, img_filename))
+        shutil.copy(src_lbl_path, os.path.join(lbl_dest_dir, lbl_filename))
+
+print("Copying training images and labels...")
+copy_files_to_split(train_images, train_img_dir, train_lbl_dir)
+print("Copying validation images and labels...")
+copy_files_to_split(val_images, val_img_dir, val_lbl_dir)
+print("Copying test images and labels...")
+copy_files_to_split(test_images, test_img_dir, test_lbl_dir)
+
+end_time_phase3 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 3 completed in {end_time_phase3 - start_time_phase3:.2f} seconds.\n")
+
+# --- Phase 4: Create YOLOv11 Data YAML ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 4: Creating YOLOv11 Data YAML")
+start_time_phase4 = time.time()
+
+data_yaml_path = os.path.join(WORK_DIR, 'food_dataset.yaml')
+
+data = {
+    'path': dataset_root, # This should be the root of 'train', 'val', 'test' folders
+    'train': 'train/images',
+    'val': 'val/images',
+    'test': 'test/images',
+    'names': {i: name for i, name in enumerate(all_classes)}
+}
+
+with open(data_yaml_path, 'w') as f:
+    yaml.dump(data, f, default_flow_style=False)
+
+print(f"YOLOv11 data YAML created at: {data_yaml_path}")
+print("Classes detected:", all_classes)
+print(f"Number of training images: {len(train_images)}")
+print(f"Number of validation images: {len(val_images)}")
+print(f"Number of test images: {len(test_images)}")
+
+end_time_phase4 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 4 completed in {end_time_phase4 - start_time_phase4:.2f} seconds.\n")
+
+# --- Phase 5: Install Ultralytics and Dependencies ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 5: Installing Ultralytics and Dependencies")
+start_time_phase5 = time.time()
+
+# Install ultralytics (ensure it's the latest version for YOLOv11 support)
+!pip install -U ultralytics
+
+end_time_phase5 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 5 completed in {end_time_phase5 - start_time_phase5:.2f} seconds.\n")
+
+# --- Phase 6: Load YOLOv11 Model (Intelligent Loading for Fresh/Resume) ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 6: Loading YOLOv11 Model")
+start_time_phase6 = time.time()
+
+try:
+    if PATH_TO_LAST_PT and os.path.exists(PATH_TO_LAST_PT):
+        # Load model from specific checkpoint path for resuming
+        model = YOLO(PATH_TO_LAST_PT)
+        print(f"YOLOv11 model loaded successfully from checkpoint: {PATH_TO_LAST_PT}.")
+    else:
+        # Load pre-trained model for a fresh start
+        model = YOLO(MODEL_TO_USE)
+        print(f"YOLOv11 model '{MODEL_TO_USE}' loaded successfully (fresh start).")
+except Exception as e:
+    print(f"Error loading YOLOv11 model: {e}")
+    print("Please ensure you have an internet connection to download the model weights (for fresh start).")
+    print("Or, if resuming, ensure PATH_TO_LAST_PT is correct and the file exists.")
+    print("If issues persist, try a different YOLOv11 model variant (e.g., 'yolo11n.pt') or verify Ultralytics installation.")
+    exit()
+
+end_time_phase6 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 6 completed in {end_time_phase6 - start_time_phase6:.2f} seconds.\n")
+
+# --- Phase 7: Train the YOLOv11 Model (Optimized for A100) ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 7: Training YOLOv11 Model")
+start_time_phase7 = time.time()
+
+# Ensure the output directory for runs is created and accessible in Google Drive
+# Ultralytics will create subdirectories within this.
+# If resuming, OUTPUT_SAVE_DIR and PROJECT_NAME are set from PATH_TO_LAST_PT.
+os.makedirs(os.path.join(OUTPUT_SAVE_DIR, PROJECT_NAME), exist_ok=True)
+
+# Determine if we are resuming (to pass to model.train)
+resume_training = True if PATH_TO_LAST_PT and os.path.exists(PATH_TO_LAST_PT) else False
+
+results = model.train(
+    data=data_yaml_path,
+    epochs=EPOCHS,
+    imgsz=IMG_SIZE,
+    batch=BATCH_SIZE,
+    project=OUTPUT_SAVE_DIR, # Base directory for this training run
+    name=PROJECT_NAME,      # Subdirectory within 'project' for this specific run
+    save=True,              # Save checkpoints and final model
+    save_period=SAVE_PERIOD_EPOCHS, # Save model weights every N epochs
+    exist_ok=False,         # Do not overwrite existing run folder (for new runs)
+    # --- A100-SPECIFIC OPTIMIZATIONS ---
+    cache='disk',           # Preprocess and cache images to local SSD for faster I/O
+    workers=16,             # Number of CPU workers for data loading (leverage A100 VM's cores)
+    half=True,              # Enable mixed-precision (FP16) training for significant speedup on A100
+    resume=resume_training  # Automatically resumes from the loaded checkpoint if applicable
+)
+
+end_time_phase7 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 7 (Training) completed in {end_time_phase7 - start_time_phase7:.2f} seconds.\n")
+
+# --- Phase 8: Final Model Saving and Cleanup ---
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 8: Final Model Saving and Cleanup")
+start_time_phase8 = time.time()
+
+# The model and its epochs are already saved to OUTPUT_SAVE_DIR by Ultralytics 'project' and 'save_period' arguments.
+# The `results` object holds information about the best model etc.
+print(f"Training results saved to: {os.path.join(OUTPUT_SAVE_DIR, PROJECT_NAME)}")
+print("Look for 'weights' folder inside the run directory for saved models and epochs.")
+
+# Optional: Clean up temporary extraction and combined directories to free up Colab disk space
+# Be cautious if you want to inspect these directories after execution.
+# shutil.rmtree(WORK_DIR, ignore_errors=True)
+# print(f"Cleaned up working directory: {WORK_DIR}")
+
+end_time_phase8 = time.time()
+print(f"[{datetime.now().strftime('%H:%M:%S')}] Phase 8 completed in {end_time_phase8 - start_time_phase8:.2f} seconds.\n")
+
+print(f"[{datetime.now().strftime('%H:%M:%S')}] All phases completed. Total execution time will vary significantly based on dataset size and GPU availability.")
